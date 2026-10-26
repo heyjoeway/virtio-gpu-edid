@@ -52,7 +52,7 @@ writes `build/vm-edid.bin`, which `install` prefers over the bundled file.
 
 ## Default modes
 
-Every resolution at every refresh rate (156 modes), plus the preferred mode, as CVT reduced
+Every resolution at every refresh rate (91 modes), plus the preferred mode, as CVT reduced
 blanking v2 timings:
 
 | Aspect | Resolutions |
@@ -62,20 +62,31 @@ blanking v2 timings:
 | 21:9 and similar | 2560x1080, 3440x1440, 3840x1600, 5120x2160 |
 | 32:9 | 3840x1080, 5120x1440, 7680x2160 |
 
-Refresh rates: 60, 75, 100, 120, 144, 165, 175, 180, 200, 240, 280 and 360 Hz.
-The desktop starts at the preferred mode, 1024x768 @ 60. Pick your real mode
-once in KDE's display settings or Steam's display settings; both remember it
-per monitor, so later boots come up in it.
+Refresh rates: 60, 100, 120, 144, 165, 240 and 360 Hz.
+The desktop starts at the preferred mode, 1280x800 @ 60, the same size the
+VM's UEFI boot screen uses. Pick your real mode once in KDE's display settings
+or Steam's display settings; both remember it per monitor, so later boots come
+up in it.
 
-**Why 1024x768:** virtio-gpu deletes any mode flagged preferred unless it's
-1024x768 or within 16 pixels of the scanout size QEMU reports. That size starts
-as the device's `xres`/`yres` (1280x800 unless set) but can follow the console
-client, for example noVNC with remote resizing. Without a preferred mode,
-compositors and the boot console start at the biggest mode in the list: here
-that was 7680x2160 @ 360 Hz, which left the boot screen panned and coincided
-with boot taking minutes. 1024x768 is the one size that's always kept. For a
-different preferred mode, pin the scanout size on the host and tell the
-generator; the generator refuses a preferred mode that would be deleted:
+**Why only these rates:** KDE Plasma passes the EDID to its own processes
+base64-encoded in a single Wayland message, and libwayland limits a message to
+4 KB. That allows at most 23 EDID blocks (about 110 modes). A bigger EDID
+works in Gamescope and GNOME, but in Plasma the desktop stays black and
+System Settings exits as soon as it's opened: plasmashell, kded and
+`kscreen-doctor` all log `Message length … exceeds limit 4096`. The generator
+refuses an EDID over 23 blocks. The default is 20.
+
+**Why 1280x800:** virtio-gpu deletes any mode flagged preferred unless it's
+1024x768 or within 16 pixels of the scanout size QEMU reports. That size is
+the device's `xres`/`yres`, 1280x800 unless set, which is also what UEFI boots
+at. Without a preferred mode, compositors and the boot console start at the
+biggest mode in the list: here that was 7680x2160 @ 360 Hz, which left the
+boot screen panned and coincided with boot taking minutes. The reported size
+can follow the console client, for example noVNC with remote resizing; if you
+use that, build with `--preferred 1024x768@60`, the one size that's always
+kept. For a different preferred mode, pin the scanout size on the host and
+tell the generator; the generator refuses a preferred mode that would be
+deleted:
 
 ```sh
 # Proxmox host, /etc/pve/qemu-server/<vmid>.conf (append to any existing args:)
@@ -89,7 +100,7 @@ args: -set device.vga.xres=2560 -set device.vga.yres=1440
 Customize with `build` options (see `make_edid.py --help`):
 
 ```sh
-./vm-edid build --resolutions 2560x1440,3440x1440 --rates 60,120,165,240
+./vm-edid build --resolutions 2560x1440,3440x1440 --rates 60,75,120,165,180,240
 ./vm-edid build --max-clock-mhz 2000   # drop the most extreme modes
 python3 make_edid.py --list          # print the modes without writing a file
 ```
@@ -100,7 +111,7 @@ python3 make_edid.py --list          # print the modes without writing a file
   - The base EDID block carries only the preferred mode. Its detailed timing
     format tops out at a 655 MHz pixel clock.
   - Every other mode goes into DisplayID 1.3 extension blocks as Type I
-    timings, five per 128-byte block. The default matrix is 33 blocks (4 KB).
+    timings, five per 128-byte block. The default matrix is 20 blocks (2.5 KB).
   - DisplayID 2.0 Type VII timings would also work for the kernel, but
     libdisplay-info doesn't decode them, so they aren't used.
 - **No inferred modes:** there's no range-limits descriptor and no

@@ -17,9 +17,14 @@ modes: the mode list is exactly what is generated here.
 
 The preferred mode must be 1024x768, or match the scanout size QEMU reports:
 virtio-gpu deletes any other mode marked preferred, and compositors then fall
-back to the largest mode in the list. The reported size starts as the device's
-xres/yres but can follow the console client (e.g. noVNC remote resizing), so
-1024x768 is the only size that is always kept.
+back to the largest mode in the list. The reported size is the device's
+xres/yres (1280x800 unless set), which is also the size UEFI boots at, so the
+default preferred mode is 1280x800. The size can follow the console client
+(e.g. noVNC remote resizing); 1024x768 is the only size that is always kept.
+
+KDE Plasma sends the EDID to its own clients base64-encoded in one Wayland
+message, and libwayland caps messages at 4 KB: an EDID over 23 blocks makes
+plasmashell, kded and System Settings exit. The generator refuses one.
 
 Run with --help for options; --list prints the modes without writing a file.
 """
@@ -38,9 +43,11 @@ DEFAULT_RESOLUTIONS = [
     # 32:9 super ultrawides
     "3840x1080", "5120x1440", "7680x2160",
 ]
-DEFAULT_RATES = [60, 75, 100, 120, 144, 165, 175, 180, 200, 240, 280, 360]
-DEFAULT_PREFERRED = "1024x768@60"   # virtio-gpu always keeps a 1024x768 preferred mode
+DEFAULT_RATES = [60, 100, 120, 144, 165, 240, 360]
+DEFAULT_PREFERRED = "1280x800@60"   # QEMU and UEFI default scanout size
+DEFAULT_HOST_SIZE = "1280x800"     # virtio-gpu xres/yres unless set
 DEFAULT_NAME = "VM Display"
+MAX_BLOCKS = 23               # KDE: base64 EDID must fit a 4 KB Wayland message
 TIMINGS_PER_BLOCK = 5          # 5 x 20-byte Type I timings fit one DisplayID block
 MAX_DTD_CLOCK_KHZ = 655350     # EDID detailed timing limit
 MAX_TYPE1_CLOCK_KHZ = (1 << 24) * 10  # 24-bit field in 10 kHz units
@@ -217,9 +224,9 @@ def main():
     ap.add_argument("-p", "--preferred", type=parse_mode, default=parse_mode(DEFAULT_PREFERRED),
                     help="mode the desktop starts in, WxH@Hz (default: %(default)s)".replace(
                         "%(default)s", DEFAULT_PREFERRED))
-    ap.add_argument("--host-size", type=parse_res, default=None,
-                    help="scanout size QEMU reports (the virtio-gpu device's xres/yres); "
-                         "required for a preferred mode other than 1024x768")
+    ap.add_argument("--host-size", type=parse_res, default=parse_res(DEFAULT_HOST_SIZE),
+                    help="scanout size QEMU reports, the virtio-gpu device's xres/yres "
+                         "(default: %s)" % DEFAULT_HOST_SIZE)
     ap.add_argument("--max-clock-mhz", type=float, default=0,
                     help="drop modes above this pixel clock (default: no limit)")
     ap.add_argument("-n", "--name", default=DEFAULT_NAME, help="monitor name, max 13 chars (default: %(default)s)")
@@ -231,13 +238,11 @@ def main():
     # virtio_gpu_conn_mode_valid() keeps a preferred mode only if it is 1024x768
     # or at most 16 pixels smaller than the reported scanout in each direction.
     if (pw, ph) != (1024, 768):
-        if not args.host_size:
-            sys.exit(f"virtio-gpu deletes a preferred {pw}x{ph} mode unless the scanout size QEMU "
-                     f"reports matches it. Set the VM's virtio-gpu xres/yres to {pw}x{ph} and pass "
-                     f"--host-size {pw}x{ph}, or keep the default 1024x768 preferred mode.")
         hw, hh = args.host_size
         if not (hw - 16 <= pw <= hw and hh - 16 <= ph <= hh):
-            sys.exit(f"preferred {pw}x{ph} doesn't match --host-size {hw}x{hh}; virtio-gpu would delete it")
+            sys.exit(f"virtio-gpu deletes a preferred {pw}x{ph} mode unless the scanout size QEMU "
+                     f"reports ({hw}x{hh}) matches it. Set the VM's virtio-gpu xres/yres to "
+                     f"{pw}x{ph} and pass --host-size {pw}x{ph}, or use --preferred 1024x768@60.")
     if preferred["clock_khz"] > MAX_DTD_CLOCK_KHZ:
         sys.exit(f"preferred mode needs {preferred['clock_khz'] / 1000:.0f} MHz; "
                  f"an EDID detailed timing allows at most {MAX_DTD_CLOCK_KHZ / 1000:.2f} MHz")
@@ -257,8 +262,10 @@ def main():
             timings.append(t)
 
     ext = displayid_blocks(preferred, timings, SIZE_MM)
-    if len(ext) > 254:
-        sys.exit(f"{len(timings)} modes need {len(ext)} extension blocks; the maximum is 254")
+    if 1 + len(ext) > MAX_BLOCKS:
+        sys.exit(f"{1 + len(timings)} modes need {1 + len(ext)} EDID blocks; KDE Plasma crashes "
+                 f"above {MAX_BLOCKS} ({(MAX_BLOCKS - 1) * TIMINGS_PER_BLOCK} modes). "
+                 f"Use fewer --resolutions or --rates, or --max-clock-mhz.")
 
     if args.list:
         for t in [preferred] + timings:
